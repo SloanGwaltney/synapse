@@ -12,7 +12,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var flagWorkers int
+var (
+	flagWorkers      int
+	flagOverviewModel string
+)
 
 var indexCmd = &cobra.Command{
 	Use:   "index <path>",
@@ -35,11 +38,17 @@ var indexCmd = &cobra.Command{
 			return fmt.Errorf("create db directory: %w", err)
 		}
 
+		overviewModel := flagOverviewModel
+		if overviewModel == "" {
+			overviewModel = flagChatModel
+		}
+
 		idx, err := index.New(index.Config{
-			DBPath:    dbPath,
-			OllamaURL: flagOllama,
-			Model:     flagModel,
-			Workers:   flagWorkers,
+			DBPath:        dbPath,
+			OllamaURL:     flagOllama,
+			Model:         flagModel,
+			Workers:       flagWorkers,
+			OverviewModel: overviewModel,
 		})
 		if err != nil {
 			return err
@@ -65,5 +74,6 @@ var indexCmd = &cobra.Command{
 
 func init() {
 	indexCmd.Flags().IntVar(&flagWorkers, "workers", runtime.NumCPU(), "parallel workers")
+	indexCmd.Flags().StringVar(&flagOverviewModel, "overview-model", "", "model for overview generation (default: same as --chat-model)")
 	rootCmd.AddCommand(indexCmd)
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -25,10 +26,20 @@ type Store interface {
 	InsertEmbeddings(chunkIDs []int64, embeddings [][]float32) error
 	// Search finds the top-k chunks closest to the query embedding.
 	Search(queryEmbedding []float32, k int) ([]SearchResult, error)
+	// FTSSearch finds the top-k chunks matching the query via FTS5/BM25 keyword search.
+	FTSSearch(query string, k int) ([]SearchResult, error)
 	// GetMeta returns a metadata value by key, or "" if not set.
 	GetMeta(key string) (string, error)
 	// SetMeta sets a metadata key-value pair.
 	SetMeta(key, value string) error
+	// ListFiles returns a summary of all indexed files.
+	ListFiles() ([]FileSummary, error)
+	// ListTopChunks returns name, kind, and file path for all named chunks.
+	ListTopChunks() ([]ChunkSummary, error)
+	// GetAllFileContent returns all chunk content for a single file, concatenated.
+	GetAllFileContent(path string) (string, error)
+	// SetFileSummary updates the summary for a file.
+	SetFileSummary(path string, summary string) error
 	// DeleteAllChunks removes all files, chunks, and embeddings.
 	DeleteAllChunks() error
 	// Close closes the underlying database.
@@ -99,7 +110,7 @@ func (s *SQLiteStore) UpsertFile(f FileRecord) (int64, error) {
 		}
 		// Update the file record.
 		_, err = tx.Exec(
-			"UPDATE files SET hash = ?, language = ?, indexed_at = CURRENT_TIMESTAMP, size_bytes = ? WHERE id = ?",
+			"UPDATE files SET hash = ?, language = ?, indexed_at = CURRENT_TIMESTAMP, size_bytes = ?, summary = '' WHERE id = ?",
 			f.Hash, f.Language, f.SizeBytes, existingID,
 		)
 		if err != nil {
@@ -208,9 +219,8 @@ func (s *SQLiteStore) Search(queryEmbedding []float32, k int) ([]SearchResult, e
 		FROM vec_chunks v
 		JOIN chunks c ON c.id = v.chunk_id
 		JOIN files f ON f.id = c.file_id
-		WHERE v.embedding MATCH ?
+		WHERE v.embedding MATCH ? AND k = ?
 		ORDER BY v.distance
-		LIMIT ?
 	`, blob, k)
 	if err != nil {
 		return nil, err
@@ -229,6 +239,42 @@ func (s *SQLiteStore) Search(queryEmbedding []float32, k int) ([]SearchResult, e
 		if err != nil {
 			return nil, err
 		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+func (s *SQLiteStore) FTSSearch(query string, k int) ([]SearchResult, error) {
+	rows, err := s.db.Query(`
+		SELECT c.id, bm25(chunks_fts), c.name, c.kind, c.start_line, c.end_line, c.content, c.metadata,
+		       f.path, f.language
+		FROM chunks_fts
+		JOIN chunks c ON c.id = chunks_fts.rowid
+		JOIN files f ON f.id = c.file_id
+		WHERE chunks_fts MATCH ?
+		ORDER BY bm25(chunks_fts)
+		LIMIT ?
+	`, query, k)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		var bm25Score float64
+		err := rows.Scan(
+			&r.Chunk.ID, &bm25Score,
+			&r.Chunk.Name, &r.Chunk.Kind, &r.Chunk.StartLine, &r.Chunk.EndLine,
+			&r.Chunk.Content, &r.Chunk.Metadata,
+			&r.FilePath, &r.Language,
+		)
+		if err != nil {
+			return nil, err
+		}
+		// BM25 returns negative scores (lower = more relevant), negate to make Distance positive (lower = better).
+		r.Distance = -bm25Score
 		results = append(results, r)
 	}
 	return results, rows.Err()
@@ -268,6 +314,86 @@ func (s *SQLiteStore) DeleteAllChunks() error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *SQLiteStore) ListFiles() ([]FileSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT f.path, f.language, COUNT(c.id) AS chunk_count, f.summary
+		FROM files f
+		LEFT JOIN chunks c ON c.file_id = f.id
+		GROUP BY f.id
+		ORDER BY f.path
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []FileSummary
+	for rows.Next() {
+		var f FileSummary
+		if err := rows.Scan(&f.Path, &f.Language, &f.Chunks, &f.Summary); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+func (s *SQLiteStore) ListTopChunks() ([]ChunkSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT c.name, c.kind, f.path
+		FROM chunks c
+		JOIN files f ON f.id = c.file_id
+		WHERE c.name != ''
+		ORDER BY f.path, c.start_line
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chunks []ChunkSummary
+	for rows.Next() {
+		var c ChunkSummary
+		if err := rows.Scan(&c.Name, &c.Kind, &c.FilePath); err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, c)
+	}
+	return chunks, rows.Err()
+}
+
+func (s *SQLiteStore) GetAllFileContent(path string) (string, error) {
+	rows, err := s.db.Query(`
+		SELECT c.content
+		FROM chunks c
+		JOIN files f ON f.id = c.file_id
+		WHERE f.path = ?
+		ORDER BY c.start_line
+	`, path)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var b strings.Builder
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			return "", err
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(content)
+	}
+	return b.String(), rows.Err()
+}
+
+func (s *SQLiteStore) SetFileSummary(path string, summary string) error {
+	_, err := s.db.Exec("UPDATE files SET summary = ? WHERE path = ?", summary, path)
+	return err
 }
 
 func (s *SQLiteStore) Close() error {

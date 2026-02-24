@@ -7,9 +7,10 @@ import (
 )
 
 var (
-	flagDB     string
-	flagOllama string
-	flagModel  string
+	flagDB        string
+	flagOllama    string
+	flagModel     string
+	flagChatModel string
 )
 
 var rootCmd = &cobra.Command{
@@ -27,4 +28,5 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "", "database path (default <project>/.synapse/index.db)")
 	rootCmd.PersistentFlags().StringVar(&flagOllama, "ollama", "http://localhost:11434", "ollama base URL")
 	rootCmd.PersistentFlags().StringVar(&flagModel, "model", "nomic-embed-text", "embedding model")
+	rootCmd.PersistentFlags().StringVar(&flagChatModel, "chat-model", "qwen3:8b", "generative model for chat")
 }

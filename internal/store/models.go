@@ -24,6 +24,21 @@ type Chunk struct {
 	Metadata  string
 }
 
+// FileSummary is a lightweight file record for overview generation.
+type FileSummary struct {
+	Path     string
+	Language string
+	Chunks   int
+	Summary  string
+}
+
+// ChunkSummary is a lightweight chunk record for overview generation.
+type ChunkSummary struct {
+	Name     string
+	Kind     string
+	FilePath string
+}
+
 // SearchResult is a chunk with its similarity score and file path.
 type SearchResult struct {
 	Chunk    Chunk
