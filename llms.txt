@@ -1,0 +1,152 @@
+# Synapse
+
+Local code intelligence tool that indexes codebases for semantic search. Built in Go, uses tree-sitter for AST parsing, Ollama for embeddings, and SQLite with sqlite-vec for vector storage.
+
+## How It Works
+
+Synapse walks a codebase, parses source files into semantic chunks (functions, methods, classes, types) using tree-sitter grammars, embeds each chunk via Ollama, and stores everything in a local SQLite database for vector similarity search.
+
+## Usage
+
+```
+synapse index <path>          # index a codebase
+  --db       string           # database path (default <project>/.synapse/index.db)
+  --ollama   string           # ollama base URL (default http://localhost:11434)
+  --model    string           # embedding model (default nomic-embed-text)
+  --workers  int              # parallel workers (default NumCPU)
+```
+
+The database and a `.synapseignore` file are created inside the project directory under `.synapse/` and at the project root respectively. Both can be gitignored.
+
+## File Structure
+
+```
+synapse/
+├── main.go                          # Cobra CLI entrypoint
+├── cmd/
+│   ├── root.go                      # Root command, persistent flags
+│   └── index.go                     # synapse index <path> command
+├── internal/
+│   ├── store/
+│   │   ├── models.go                # FileRecord, Chunk, SearchResult types
+│   │   ├── schema.go                # DDL and Init()
+│   │   └── store.go                 # Store interface + SQLite implementation
+│   ├── chunker/
+│   │   ├── registry.go              # LanguageSpec, Registry (extension → grammar)
+│   │   ├── chunker.go               # ASTChunker: parse, deduplicate, enrich, split
+│   │   └── languages/
+│   │       ├── golang.go            # Go grammar
+│   │       ├── javascript.go        # JS grammar
+│   │       ├── typescript.go        # TS grammar
+│   │       └── python.go            # Python grammar
+│   ├── embedder/
+│   │   └── ollama.go                # Ollama /api/embed client with batching
+│   ├── walker/
+│   │   └── walker.go                # File walker with .synapseignore support
+│   └── index/
+│       ├── indexer.go               # Public API: New(), Index(), Search(), Close()
+│       └── pipeline.go              # 5-stage concurrent pipeline
+```
+
+## Ingestion Pipeline
+
+The indexer runs a 5-stage concurrent pipeline connected by channels:
+
+```
+Walk (1 goroutine)
+  → Hash + Check (N workers)
+    → Chunk (N workers)
+      → Embed (1 worker, batches of 32)
+        → Store (1 worker)
+```
+
+### Stage 1: Walk
+
+A single goroutine traverses the project directory using `filepath.WalkDir`. It only emits files whose extension matches a registered tree-sitter grammar (`.go`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.py`, `.pyi`). Directories matching patterns in `.synapseignore` are skipped entirely via `filepath.SkipDir`. Files larger than 1 MB or empty files are ignored. Symlinks are skipped.
+
+### Stage 2: Hash + Check
+
+N worker goroutines read file contents and compute a SHA-256 hash. Each hash is compared against the `files` table in the database. If the hash matches, the file is unchanged and skipped. This is what makes incremental indexing work — only new or modified files proceed.
+
+### Stage 3: Chunk
+
+N worker goroutines parse each file using its language's tree-sitter grammar. A tree-sitter query extracts semantic nodes (functions, methods, classes, type declarations). The chunker then:
+
+1. **Deduplicates** overlapping captures — when a query matches both an outer and inner node (e.g. a Python `decorated_definition` containing a `function_definition`), only the outer node is kept.
+2. **Enriches** each chunk with a context header:
+   ```
+   // File: cmd/index.go
+   // Language: go
+   // function_declaration: Execute
+   <source code>
+   ```
+3. **Splits** oversized chunks (>8 KB) at line boundaries using a 40-line window with 10-line overlap.
+
+### Stage 4: Embed
+
+A single goroutine batches chunk texts (up to 32 per request) and sends them to Ollama's `/api/embed` endpoint. The default model `nomic-embed-text` produces 768-dimensional float32 vectors.
+
+### Stage 5: Store
+
+A single goroutine writes to SQLite within transactions. For each file it:
+1. Upserts the file record (deleting any old chunks and embeddings if re-indexing).
+2. Inserts all chunks.
+3. Inserts the corresponding embedding vectors into the `vec_chunks` virtual table.
+
+## Database Schema
+
+SQLite with WAL mode and foreign keys enabled. The sqlite-vec extension provides the `vec0` virtual table for vector search.
+
+```sql
+files (id, path UNIQUE, hash, language, indexed_at, size_bytes)
+chunks (id, file_id FK→files ON DELETE CASCADE, name, kind, start_line, end_line, content, metadata)
+vec_chunks (chunk_id PK, embedding float[768])   -- sqlite-vec virtual table
+meta (key PK, value)                              -- stores embedding model name
+```
+
+## Incremental Indexing
+
+Files are identified by their relative path and SHA-256 content hash. On subsequent runs, unchanged files are skipped entirely. If the embedding model changes (detected via the `meta` table), all data is wiped and a full re-index is triggered.
+
+## .synapseignore
+
+The walker reads a `.synapseignore` file from the project root. If it doesn't exist, one is created with these defaults:
+
+```
+.git
+.svn
+.hg
+node_modules
+vendor
+__pycache__
+.idea
+.vscode
+.synapse
+dist
+build
+```
+
+Patterns match against directory names (exact match), relative paths (prefix match), and globs (`filepath.Match`). Lines starting with `#` are comments. Empty lines are ignored.
+
+## Adding a Language
+
+Register a new grammar in `internal/chunker/languages/` and call it from `internal/index/indexer.go`:
+
+```go
+func RegisterRust(r *chunker.Registry) {
+    r.Register("rust", &chunker.LanguageSpec{
+        Language:   rust.GetLanguage(),
+        Query:      `(function_item name: (identifier) @name) @chunk`,
+        Extensions: []string{"rs"},
+    })
+}
+```
+
+The `@chunk` capture defines the outer node boundary. The optional `@name` capture extracts the identifier for the context header.
+
+## Dependencies
+
+- `github.com/smacker/go-tree-sitter` — AST parsing with bundled grammars
+- `github.com/mattn/go-sqlite3` — SQLite driver (CGO)
+- `github.com/asg017/sqlite-vec-go-bindings/cgo` — sqlite-vec extension
+- `github.com/spf13/cobra` — CLI framework

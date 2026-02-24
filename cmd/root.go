@@ -1,0 +1,30 @@
+package cmd
+
+import (
+	"os"
+
+	"github.com/spf13/cobra"
+)
+
+var (
+	flagDB     string
+	flagOllama string
+	flagModel  string
+)
+
+var rootCmd = &cobra.Command{
+	Use:   "synapse",
+	Short: "Local code intelligence powered by RAG",
+}
+
+func Execute() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func init() {
+	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "", "database path (default <project>/.synapse/index.db)")
+	rootCmd.PersistentFlags().StringVar(&flagOllama, "ollama", "http://localhost:11434", "ollama base URL")
+	rootCmd.PersistentFlags().StringVar(&flagModel, "model", "nomic-embed-text", "embedding model")
+}
