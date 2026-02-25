@@ -1,3 +1,4 @@
 .synapse/
 *.exe
 .claude/
+.mcp.json
