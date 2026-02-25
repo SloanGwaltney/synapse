@@ -12,6 +12,10 @@ import (
 	"synapse/internal/store"
 )
 
+// ProgressFunc is called with the current phase, files processed so far,
+// and total files discovered. total may increase as more files are discovered.
+type ProgressFunc func(phase string, filesProcessed, filesTotal int)
+
 // Config holds the indexer configuration.
 type Config struct {
 	DBPath        string
@@ -19,6 +23,7 @@ type Config struct {
 	Model         string
 	Workers       int
 	OverviewModel string
+	OnProgress    ProgressFunc
 }
 
 // Indexer is the public API for indexing and searching codebases.
@@ -66,7 +71,7 @@ func (idx *Indexer) Index(root string) (*Stats, error) {
 		}
 	}
 
-	stats, err := runPipeline(root, idx.store, idx.chunker, idx.registry, idx.embedder, idx.config.Workers)
+	stats, err := runPipeline(root, idx.store, idx.chunker, idx.registry, idx.embedder, idx.config.Workers, idx.config.OnProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -84,11 +89,17 @@ func (idx *Indexer) Index(root string) (*Stats, error) {
 		chat := llm.NewOllamaChat(idx.config.OllamaURL, overviewModel)
 
 		fmt.Println("Generating file summaries...")
+		if idx.config.OnProgress != nil {
+			idx.config.OnProgress("Generating file summaries...", 0, 0)
+		}
 		if err := summarizeFiles(idx.store, chat); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: file summarization failed: %v\n", err)
 		}
 
 		fmt.Println("Generating project overview...")
+		if idx.config.OnProgress != nil {
+			idx.config.OnProgress("Generating project overview...", 0, 0)
+		}
 		overview, err := synthesizeOverview(idx.store, chat)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: overview generation failed: %v\n", err)
@@ -111,6 +122,10 @@ func (idx *Indexer) Search(query string, k int) ([]store.SearchResult, error) {
 	}
 	return idx.store.Search(embedding, k)
 }
+
+// Store returns the underlying store so callers (e.g. the TUI) can reuse it
+// after indexing without opening the database a second time.
+func (idx *Indexer) Store() *store.SQLiteStore { return idx.store }
 
 // Close releases resources.
 func (idx *Indexer) Close() error {

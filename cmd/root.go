@@ -16,6 +16,9 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "synapse",
 	Short: "Local code intelligence powered by RAG",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runTUI()
+	},
 }
 
 func Execute() {

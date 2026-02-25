@@ -53,6 +53,7 @@ func runPipeline(
 	registry *chunker.Registry,
 	emb *embedder.OllamaEmbedder,
 	numWorkers int,
+	onProgress ProgressFunc,
 ) (*Stats, error) {
 	if numWorkers <= 0 {
 		numWorkers = runtime.NumCPU()
@@ -209,6 +210,9 @@ func runPipeline(
 
 			stats.FilesIndexed++
 			stats.ChunksTotal += len(eb.chunks)
+			if onProgress != nil {
+				onProgress("Indexing files...", stats.FilesIndexed, int(filesTotal.Load()))
+			}
 		}
 	}()
 
