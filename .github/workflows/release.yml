@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v0.1.0)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary: synapse-linux-amd64
+
+          - name: darwin-amd64
+            runner: macos-13
+            goos: darwin
+            goarch: amd64
+            binary: synapse-darwin-amd64
+
+          - name: darwin-arm64
+            runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            binary: synapse-darwin-arm64
+
+          - name: windows-amd64
+            runner: windows-latest
+            goos: windows
+            goarch: amd64
+            binary: synapse-windows-amd64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # MinGW is pre-installed on windows-latest but not on PATH by default.
+      - name: Add MinGW to PATH
+        if: matrix.goos == 'windows'
+        run: echo "C:\msys64\mingw64\bin" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+        shell: pwsh
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+        run: go build -tags sqlite_fts5 -ldflags="-s -w" -o ${{ matrix.binary }} .
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            synapse-linux-amd64
+            synapse-darwin-amd64
+            synapse-darwin-arm64
+            synapse-windows-amd64.exe
