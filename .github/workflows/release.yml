@@ -21,24 +21,33 @@ jobs:
             goos: linux
             goarch: amd64
             binary: synapse-linux-amd64
+            cgo_cflags: ""
 
+          # macos-latest is arm64; GOARCH=amd64 cross-compiles via Apple's
+          # universal clang toolchain without needing a separate x86_64 runner.
           - name: darwin-amd64
-            runner: macos-13
+            runner: macos-latest
             goos: darwin
             goarch: amd64
             binary: synapse-darwin-amd64
+            cgo_cflags: ""
 
           - name: darwin-arm64
             runner: macos-latest
             goos: darwin
             goarch: arm64
             binary: synapse-darwin-arm64
+            cgo_cflags: ""
 
+          # sqlite-vec-go-bindings/cgo needs sqlite3.h, which MinGW doesn't
+          # include by default. We install it via pacman and add its include
+          # path to CGO_CFLAGS so the header is found at compile time.
           - name: windows-amd64
             runner: windows-latest
             goos: windows
             goarch: amd64
             binary: synapse-windows-amd64.exe
+            cgo_cflags: "-IC:/msys64/mingw64/include"
 
     steps:
       - uses: actions/checkout@v4
@@ -54,11 +63,17 @@ jobs:
         run: echo "C:\msys64\mingw64\bin" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
         shell: pwsh
 
+      - name: Install SQLite headers
+        if: matrix.goos == 'windows'
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm mingw-w64-x86_64-sqlite3
+        shell: cmd
+
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "1"
+          CGO_CFLAGS: ${{ matrix.cgo_cflags }}
         run: go build -tags sqlite_fts5 -ldflags="-s -w" -o ${{ matrix.binary }} .
         shell: bash
 
@@ -92,3 +107,4 @@ jobs:
             synapse-darwin-amd64
             synapse-darwin-arm64
             synapse-windows-amd64.exe
+
