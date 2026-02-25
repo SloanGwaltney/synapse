@@ -212,7 +212,7 @@ internal/
 
 ## Roadmap
 
-- [ ] Github Actions Build
+- [x] Github Actions Build
 - [ ] Testing
 - [ ] Observability / tracing
 - [ ] More languages (Java, C#)
